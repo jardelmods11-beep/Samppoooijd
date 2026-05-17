@@ -1,4 +1,8 @@
-// gtasa_stubs.cpp — funções do GTA SA implementadas via offset
+#include <cstdlib>
+// gtasa_stubs.cpp — funções do GTA SA via offset
+// REGRA: nunca implementar construtores/destrutores de classes GTA SA
+// O GTA SA gerencia esses objetos. Nós só chamamos via ponteiro de função.
+
 #ifdef IOS_PORT
 #include "ios_base.h"
 #include "../sa_include/GTASA.h"
@@ -36,22 +40,6 @@ void CClothes::RebuildPlayer(CPlayerPed* ped, bool b) {
     CALL(void(*)(CPlayerPed*, bool), OFF_CCLOTHES_REBUILDPLAYER)(ped, b);
 }
 
-// CPed — NÃO implementamos o construtor (causaria vtable/herança)
-// operator new apenas aloca memória, o GTA SA inicializa via offset
-void* CPed::operator new(size_t size) {
-    return ::operator new(size);
-}
-
-// CPed::CPed — delega para o construtor real do GTA SA via offset
-// Não chama base class — o GTA SA já faz isso internamente
-CPed::CPed(unsigned int modelIndex) {
-    // Chama o construtor real do GTA SA que inicializa vtable e tudo mais
-    typedef void (*CPedCtor_t)(CPed*, unsigned int);
-    // O offset real do ctor será resolvido pelo extract_offsets
-    // Por agora usa o offset mais próximo que temos
-    CALL(CPedCtor_t, OFF_FINDPLAYERPED)(this, modelIndex);
-}
-
 void CPed::SetPedState(ePedState state) {
     CALL(void(*)(CPed*, ePedState), OFF_CPED_SETPEDSTATE)(this, state);
 }
@@ -68,17 +56,7 @@ void CWorld::Remove(CEntity* entity) {
     CALL(void(*)(CEntity*), OFF_CWORLD_REMOVE)(entity);
 }
 
-// CPhysical — stubs vazios para satisfazer o linker
-// O GTA SA gerencia esses objetos internamente
-CPhysical::CPhysical() {}
-CPhysical::~CPhysical() {}
-
-// __clear_cache
+// __clear_cache — builtin ARM64
 extern "C" void __clear_cache(void*, void*) {}
 
 #endif // IOS_PORT
-
-// Hierarquia de destrutores virtuais — stubs para o linker
-// O GTA SA gerencia a memória internamente
-CPlaceable::~CPlaceable() {}
-CEntity::~CEntity() {}
