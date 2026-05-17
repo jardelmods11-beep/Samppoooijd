@@ -9,25 +9,18 @@ on:
         type: string
 
 jobs:
-  build:
+  # ── Job 1: Ubuntu (barato) — baixa IPA, extrai offsets ──────────────────────
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      offsets: ${{ steps.offsets.outputs.content }}
 
     steps:
-      - name: Checkout repositório
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Instalar dependências
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y clang gcc-aarch64-linux-gnu g++-aarch64-linux-gnu python3-pip zip unzip file
-          pip3 install lief --break-system-packages
-
-      - name: Criar stub mach-o/dyld.h
-        run: |
-          mkdir -p stubs/mach-o
-          printf '#pragma once\n#include <stdint.h>\n#ifdef __cplusplus\nextern "C" {\n#endif\nuint32_t _dyld_image_count(void);\nconst char* _dyld_get_image_name(uint32_t);\nconst void* _dyld_get_image_header(uint32_t);\n#ifdef __cplusplus\n}\n#endif\n' > stubs/mach-o/dyld.h
-          echo "Stub criado:"
-          cat stubs/mach-o/dyld.h
+      - name: Instalar Python
+        run: pip3 install lief --break-system-packages
 
       - name: Baixar GTA SA IPA
         run: |
@@ -37,16 +30,12 @@ jobs:
 
       - name: Extrair binário GTASA do IPA
         run: |
-          python3 scripts/unpack_ipa.py \
-            --ipa ipa_input/gtasa_original.ipa \
-            --output extracted/
-          BINARY=$(python3 scripts/unpack_ipa.py \
-            --ipa ipa_input/gtasa_original.ipa \
-            --output extracted/ 2>/dev/null | grep "BINARY_PATH=" | cut -d= -f2)
+          python3 scripts/unpack_ipa.py --ipa ipa_input/gtasa_original.ipa --output extracted/
+          BINARY=$(python3 scripts/unpack_ipa.py --ipa ipa_input/gtasa_original.ipa --output extracted/ 2>/dev/null | grep "BINARY_PATH=" | cut -d= -f2)
           echo "GTASA_BINARY=$BINARY" >> $GITHUB_ENV
-          echo "Binario: $BINARY"
 
       - name: Extrair offsets do GTASA iOS
+        id: offsets
         run: |
           python3 scripts/extract_offsets.py \
             --binary "${{ env.GTASA_BINARY }}" \
@@ -54,52 +43,74 @@ jobs:
             --json offsets_report.json
           cat src/ios_offsets.h
 
-      - name: Compilar libSAMP.dylib (ARM64)
+      - name: Salvar IPA e offsets para próximo job
+        uses: actions/upload-artifact@v4
+        with:
+          name: prepare-artifacts
+          path: |
+            ipa_input/gtasa_original.ipa
+            src/ios_offsets.h
+            offsets_report.json
+          retention-days: 1
+
+  # ── Job 2: macOS (só compilação da dylib ~1-2 min) ──────────────────────────
+  build:
+    runs-on: macos-latest
+    needs: prepare
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Baixar artifacts do job anterior
+        uses: actions/download-artifact@v4
+        with:
+          name: prepare-artifacts
+
+      - name: Mover arquivos para lugar certo
+        run: |
+          mv gtasa_original.ipa ipa_input/gtasa_original.ipa 2>/dev/null || true
+          mv ios_offsets.h src/ios_offsets.h 2>/dev/null || true
+          ls src/ios_offsets.h && echo "offsets OK"
+
+      - name: Compilar libSAMP.dylib (ARM64 iOS)
         run: |
           mkdir -p build
-          SYSROOT=/usr/aarch64-linux-gnu
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          CLANG=$(xcrun --find clang++)
 
-          CFLAGS="-target aarch64-linux-gnu --sysroot=$SYSROOT -I$SYSROOT/include -O2 -fvisibility=hidden -fPIC -std=c++17 -DIOS_PORT -DHOST_ENDIAN_IS_LITTLE -DLITTLE_ENDIAN -DRAKSAMP_CLIENT -DNETCODE_OPENCONNLULZ=6969 -frtti -fexceptions -w -I src/ -I sa_include/ -I raknet/ -I raknet/SAMP/ -I ttmath/ -I stubs/"
-          LDFLAGS="-shared -target aarch64-linux-gnu --sysroot=$SYSROOT -fPIC"
+          CFLAGS="-target arm64-apple-ios12.0 -isysroot $SDK -O2 -fvisibility=hidden -fPIC -std=c++17 -DIOS_PORT -DHOST_ENDIAN_IS_LITTLE -DLITTLE_ENDIAN -DRAKSAMP_CLIENT -DNETCODE_OPENCONNLULZ=6969 -frtti -fexceptions -w -I src/ -I sa_include/ -I raknet/ -I raknet/SAMP/ -I ttmath/"
+          LDFLAGS="-dynamiclib -target arm64-apple-ios12.0 -isysroot $SDK -install_name @executable_path/Frameworks/libSAMP.dylib -lc++"
 
           OBJECTS=""
           PIDS=()
-
-          for cpp in src/*.cpp; do
-            obj="build/$(basename ${cpp%.cpp}).o"
-            clang++ $CFLAGS -c "$cpp" -o "$obj" &
-            PIDS+=($!)
-            OBJECTS="$OBJECTS $obj"
-          done
-
-          for cpp in raknet/*.cpp raknet/SAMP/*.cpp; do
+          for cpp in src/*.cpp raknet/*.cpp raknet/SAMP/*.cpp; do
             [ -f "$cpp" ] || continue
-            obj="build/raknet_$(basename ${cpp%.cpp}).o"
-            clang++ $CFLAGS -c "$cpp" -o "$obj" &
+            obj="build/$(echo $cpp | tr '/' '_').o"
+            $CLANG $CFLAGS -c "$cpp" -o "$obj" &
             PIDS+=($!)
             OBJECTS="$OBJECTS $obj"
           done
 
           FAIL=0
-          for pid in "${PIDS[@]}"; do
-            wait $pid || FAIL=1
-          done
+          for pid in "${PIDS[@]}"; do wait $pid || FAIL=1; done
           [ $FAIL -eq 0 ] || { echo "ERRO na compilacao"; exit 1; }
 
           echo "[LD] Linkando..."
-          clang++ $LDFLAGS $OBJECTS -o build/libSAMP.dylib
+          $CLANG $LDFLAGS $OBJECTS -o build/libSAMP.dylib
           file build/libSAMP.dylib
           ls -lh build/libSAMP.dylib
 
       - name: Injetar libSAMP.dylib no IPA
         run: |
+          pip3 install lief --break-system-packages
           python3 scripts/inject_dylib.py \
             --ipa ipa_input/gtasa_original.ipa \
             --dylib build/libSAMP.dylib \
             --output gtasa_samp.ipa
           ls -lh gtasa_samp.ipa
 
-      - name: Upload IPA com SAMP
+      - name: Upload IPA final
         uses: actions/upload-artifact@v4
         with:
           name: gtasa-samp-ios
