@@ -1,7 +1,7 @@
 #include "RakClient.h"
-#include <RakNetworkFactory.h>
-#include <PacketEnumerations.h>
-#include <StringCompressor.h>
+#include "RakNetworkFactory.h"
+#include "PacketEnumerations.h"
+#include "StringCompressor.h"
 
 #include "types.h"
 #include "RPC.h"
