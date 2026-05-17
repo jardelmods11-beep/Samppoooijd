@@ -12,55 +12,53 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    # ubuntu-latest = GRATUITO (macos cobra 10x mais e bloqueou sua conta)
+    runs-on: ubuntu-latest
 
     steps:
-      # ─── 1. CHECKOUT ────────────────────────────────────────────────────────
       - name: Checkout repositório
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
-      # ─── 2. DEPENDÊNCIAS ────────────────────────────────────────────────────
-      - name: Instalar dependências Python
-        run: pip3 install lief --break-system-packages
-
-      - name: Instalar llvm/clang ARM64 (via Homebrew)
+      - name: Instalar dependências
         run: |
-          brew install llvm
-          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
+          sudo apt-get update -qq
+          sudo apt-get install -y clang llvm lld cmake git \
+            libxml2-dev libssl-dev zlib1g-dev python3-pip curl unzip file
+          pip3 install lief
 
-      # ─── 3. BAIXAR O GTA SA IPA ─────────────────────────────────────────────
+      - name: Baixar iPhoneOS SDK (theos/sdks - publico e gratuito)
+        run: |
+          mkdir -p $HOME/iossdk
+          curl -L \
+            "https://github.com/theos/sdks/releases/download/2024-02-29/iPhoneOS16.2.sdk.tar.xz" \
+            -o /tmp/iPhoneOS.sdk.tar.xz
+          tar -xf /tmp/iPhoneOS.sdk.tar.xz -C $HOME/iossdk
+          echo "IPHONE_SDK=$HOME/iossdk/iPhoneOS16.2.sdk" >> $GITHUB_ENV
+          ls $HOME/iossdk/
+
       - name: Baixar GTA SA IPA
         run: |
           mkdir -p ipa_input
-          curl -L "${{ github.event.inputs.gtasa_ipa_url }}" -o ipa_input/gtasa_original.ipa
-
+          curl -L "${{ github.event.inputs.gtasa_ipa_url }}" \
+            -o ipa_input/gtasa_original.ipa
           TIPO=$(file ipa_input/gtasa_original.ipa)
-          echo "Tipo do arquivo: $TIPO"
-          echo "Tamanho: $(du -sh ipa_input/gtasa_original.ipa | cut -f1)"
-
+          echo "Tipo: $TIPO"
           if ! echo "$TIPO" | grep -qiE "zip|archive"; then
-            echo "ERRO: O arquivo baixado nao e um IPA valido!"
-            echo "Primeiros bytes (pode ser pagina HTML?):"
+            echo "ERRO: nao e um IPA valido!"
             head -c 500 ipa_input/gtasa_original.ipa
             exit 1
           fi
 
-      # ─── 4. EXTRAIR BINÁRIO DO IPA ──────────────────────────────────────────
-      - name: Extrair binário GTASA do IPA
+      - name: Extrair binario GTASA do IPA
         run: |
           python3 scripts/unpack_ipa.py \
             --ipa ipa_input/gtasa_original.ipa \
             --output extracted/
-
-          BINARY=$(python3 scripts/unpack_ipa.py \
-            --ipa ipa_input/gtasa_original.ipa \
-            --output extracted/ 2>/dev/null | grep "BINARY_PATH=" | cut -d= -f2)
+          BINARY=$(find extracted -name "GrandTheftAutoSanAndreas" -o -name "GTASA" | head -1)
           echo "GTASA_BINARY=$BINARY" >> $GITHUB_ENV
           echo "Binario: $BINARY"
+          file "$BINARY"
 
-      # ─── 5. EXTRAIR OFFSETS AUTOMATICAMENTE ─────────────────────────────────
       - name: Extrair offsets do GTASA iOS
         run: |
           python3 scripts/extract_offsets.py \
@@ -68,67 +66,51 @@ jobs:
             --output src/ios_offsets.h \
             --json offsets_report.json \
             --android libs/android/libGTASA.so
-
-          echo "=== OFFSETS GERADOS ==="
           cat src/ios_offsets.h
 
-      # ─── 6. COMPILAR SAMP PARA ARM64 ────────────────────────────────────────
       - name: Compilar libSAMP.dylib (ARM64 iOS)
         run: |
           mkdir -p build
-
-          CLANG="$(brew --prefix llvm)/bin/clang++"
-          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-
+          CLANG="clang++"
+          SDK="${{ env.IPHONE_SDK }}"
           CFLAGS=(
-            -target arm64-apple-ios12.0
-            -isysroot "$SDK"
-            -O2
-            -fvisibility=hidden
-            -fno-objc-arc
-            -std=c++17
-            -DIOS_PORT
-            -I src/
-            -I sa_include/
-            -I raknet/
-            -I ttmath/
+            -target arm64-apple-ios12.0 -isysroot "$SDK"
+            -O2 -fvisibility=hidden -fno-objc-arc -std=c++17
+            -DIOS_PORT -DHOST_ENDIAN_IS_LITTLE -DLITTLE_ENDIAN
+            -DRAKSAMP_CLIENT -DNETCODE_OPENCONNLULZ=6969
+            -frtti -fexceptions -w
+            -I src/ -I sa_include/ -I raknet/ -I ttmath/
           )
-
           LDFLAGS=(
-            -dynamiclib
-            -target arm64-apple-ios12.0
-            -isysroot "$SDK"
-            -install_name @executable_path/Frameworks/libSAMP.dylib
-            -lc++
+            -dynamiclib -target arm64-apple-ios12.0 -isysroot "$SDK"
+            -install_name @executable_path/Frameworks/libSAMP.dylib -lc++
           )
-
           OBJECTS=()
-          for cpp in src/*.cpp raknet/*.cpp; do
+          for cpp in src/*.cpp; do
             obj="build/$(basename ${cpp%.cpp}).o"
-            echo "[CC] $cpp -> $obj"
+            echo "[CC] $cpp"
             "$CLANG" "${CFLAGS[@]}" -c "$cpp" -o "$obj"
             OBJECTS+=("$obj")
           done
-
-          echo "[LD] Linkando libSAMP.dylib..."
+          for cpp in raknet/*.cpp raknet/SAMP/*.cpp; do
+            obj="build/raknet_$(basename ${cpp%.cpp}).o"
+            echo "[CC] $cpp"
+            "$CLANG" "${CFLAGS[@]}" -c "$cpp" -o "$obj"
+            OBJECTS+=("$obj")
+          done
+          echo "[LD] Linkando..."
           "$CLANG" "${LDFLAGS[@]}" "${OBJECTS[@]}" -o build/libSAMP.dylib
-
-          echo "=== Build concluido ==="
           file build/libSAMP.dylib
           ls -lh build/libSAMP.dylib
 
-      # ─── 7. INJETAR DYLIB NO IPA ────────────────────────────────────────────
       - name: Injetar libSAMP.dylib no IPA
         run: |
           python3 scripts/inject_dylib.py \
             --ipa ipa_input/gtasa_original.ipa \
             --dylib build/libSAMP.dylib \
             --output gtasa_samp.ipa
-
-          echo "=== IPA final ==="
           ls -lh gtasa_samp.ipa
 
-      # ─── 8. UPLOAD DOS ARTIFACTS ────────────────────────────────────────────
       - name: Upload IPA com SAMP
         uses: actions/upload-artifact@v4
         with:
@@ -145,29 +127,9 @@ jobs:
             src/ios_offsets.h
           retention-days: 30
 
-      - name: Upload dylib (para debug)
+      - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
           name: libSAMP-dylib
           path: build/libSAMP.dylib
           retention-days: 7
-
-      # ─── 9. RESUMO ──────────────────────────────────────────────────────────
-      - name: Resumo do build
-        run: |
-          echo "### Build concluido!" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Arquivo | Tamanho |" >> $GITHUB_STEP_SUMMARY
-          echo "|---------|---------|" >> $GITHUB_STEP_SUMMARY
-          echo "| gtasa_samp.ipa | $(du -sh gtasa_samp.ipa | cut -f1) |" >> $GITHUB_STEP_SUMMARY
-          echo "| libSAMP.dylib | $(du -sh build/libSAMP.dylib | cut -f1) |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Offsets encontrados:**" >> $GITHUB_STEP_SUMMARY
-          python3 -c "
-          import json
-          with open('offsets_report.json') as f:
-              data = json.load(f)
-          found = sum(1 for v in data.values() if v['offset'] is not None)
-          total = len(data)
-          print(f'{found}/{total} offsets mapeados automaticamente')
-          " >> $GITHUB_STEP_SUMMARY
