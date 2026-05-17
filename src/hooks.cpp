@@ -2,7 +2,7 @@
 #include "utils.h"
 #include "ios_hooks.h"
 #include "ios_offsets.h"
-#include "GTASA.h"
+#include "../sa_include/GTASA.h"
 
 static CPlayerPed* FindPlayerPed_ios(int idx) {
     return GTASA_FUNC(CPlayerPed*(*)(int), FINDPLAYERPED)(idx);
