@@ -1,13 +1,11 @@
 #pragma once
 #include <cstdint>
 #include <cstring>
-#include "ios_offsets.h"
-
-// GTASA_ADDR já definido em ios_offsets.h:
-// #define GTASA_ADDR(offset) (GetGTASABase() + (uintptr_t)(offset))
+#include "ios_offsets.h"  // define GTASA_ADDR
 
 #ifdef __APPLE__
 #include <sys/mman.h>
+#include <unistd.h>  // getpagesize
 
 static inline bool _hook_write_branch(uintptr_t target, uintptr_t destination) {
     if (!target) return false;
