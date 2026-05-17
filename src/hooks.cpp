@@ -1,11 +1,11 @@
+#include "ios_offsets.h"
+#include "ios_hooks.h"
 #include "CNetGame.h"
 #include "utils.h"
-#include "ios_hooks.h"
-#include "ios_offsets.h"
 #include "../sa_include/GTASA.h"
 
 static CPlayerPed* FindPlayerPed_ios(int idx) {
-    return GTASA_FUNC(CPlayerPed*(*)(int), FINDPLAYERPED)(idx);
+    return GTASA_FUNC(CPlayerPed*(*)(int), OFFSET_FINDPLAYERPED)(idx);
 }
 
 int CRunningScript__Process_hook(void* p) {
@@ -25,7 +25,7 @@ int CPopCycle__Update_hook() { return 0; }
 
 void LoadingScreen_hook(char const* a1, char const* a2, char const* a3) {
     samp_log("LoadingScreen_hook(%s, %s, %s)", a1, a2, a3);
-    GTASA_FUNC(void(*)(), LOADINGSCREEN_FUNC)();
+    GTASA_FUNC(void(*)(), OFFSET_LOADINGSCREEN_FUNC)();
 }
 
 void RenderSAMP() {
@@ -34,10 +34,10 @@ void RenderSAMP() {
 }
 
 void Render2dStuffAfterFade_hook() {
-    GTASA_FUNC(void(*)(), CHUD_DRAWAFTERFADE)();
+    GTASA_FUNC(void(*)(), OFFSET_CHUD_DRAWAFTERFADE)();
     RenderSAMP();
-    GTASA_FUNC(void(*)(int), CMESSAGES_DISPLAY)(0);
-    GTASA_FUNC(void(*)(), CCREDITS_RENDER)();
+    GTASA_FUNC(void(*)(int), OFFSET_CMESSAGES_DISPLAY)(0);
+    GTASA_FUNC(void(*)(), OFFSET_CCREDITS_RENDER)();
 }
 
 void InitHooks() {
