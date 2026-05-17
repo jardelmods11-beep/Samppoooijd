@@ -3,6 +3,9 @@
 #include <cstring>
 #include "ios_offsets.h"
 
+// GTASA_ADDR já definido em ios_offsets.h:
+// #define GTASA_ADDR(offset) (GetGTASABase() + (uintptr_t)(offset))
+
 #ifdef __APPLE__
 #include <sys/mman.h>
 
