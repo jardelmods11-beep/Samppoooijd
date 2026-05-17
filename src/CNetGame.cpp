@@ -33,14 +33,6 @@ void CNetGame::DbgConnect()
 	// m_rakClientInterface->Connect("192.168.0.35", 7777, 0, 0, 0); // Sasuke
 }
 
-unsigned int GetTickCount()
-{
-	struct timeval tv;
-	if(gettimeofday(&tv, NULL) != 0)
-		return 0;
-
-	return (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
-}
 
 unsigned int lastOnFootSyncTick = 0;
 extern int g_iNetModeNormalOnfootSendRate;
