@@ -1,7 +1,9 @@
 #pragma once
 #include "ios_base.h"
 
-// Offsets reais do gta3sa ARM64
+// ── Offsets reais do gta3sa ARM64 (14MB, fat binary ARMv7+ARM64) ─────────────
+// Encontrados via ADRP+ADD scan, ADR scan, pattern analysis
+
 #define OFFSET_FINDPLAYERPED                     0x004A5DE0UL
 #define OFFSET_CFONT_INITIALISE                  0x0037C114UL
 #define OFFSET_CFONT_PRINTSTRING                 0x0037EBC4UL
@@ -21,3 +23,8 @@
 #define OFFSET_SAVELOAD                          0x002D4B84UL
 #define OFFSET_TOUCHINPUT                        0x0014505CUL
 #define OFFSET_GGAMESTATE_FUNC                   0x004B7E70UL
+#define OFFSET_ASCIITOGXTCHAR                    0x00441430UL
+#define OFFSET_CWORLD_ADD                        0x003921D8UL
+#define OFFSET_CWORLD_REMOVE                     0x00392504UL
+#define OFFSET_CPED_SETPEDSTATE                  0x003DB7D8UL
+#define OFFSET_CPED_SETMOVESTATE                 0x003DB864UL
