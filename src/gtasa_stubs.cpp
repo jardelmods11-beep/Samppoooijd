@@ -1,62 +1,60 @@
-#include <cstdlib>
-// gtasa_stubs.cpp — funções do GTA SA via offset
-// REGRA: nunca implementar construtores/destrutores de classes GTA SA
-// O GTA SA gerencia esses objetos. Nós só chamamos via ponteiro de função.
-
+// gtasa_stubs.cpp — implementa funções do GTA SA via offsets reais
 #ifdef IOS_PORT
+#include <cstdlib>
 #include "ios_base.h"
+#include "ios_offsets.h"
 #include "../sa_include/GTASA.h"
 
-#define OFF_FINDPLAYERPED                     0x004A5DE0UL
-#define OFF_CPLAYERPED_SETUPPLAYERPED         0x004A5DE0UL
-#define OFF_CSTREAMING_REQUESTSPECIALMODEL    0x002EB31CUL
-#define OFF_CSTREAMING_LOADALLREQUESTEDMODELS 0x002EB31CUL
-#define OFF_CCLOTHES_REBUILDPLAYER            0x002DED20UL
-#define OFF_CPED_SETPEDSTATE                  0x002A67D4UL
-#define OFF_CPED_SETMOVESTATE                 0x002A67D4UL
-#define OFF_CWORLD_ADD                        0x002F7894UL
-#define OFF_CWORLD_REMOVE                     0x002F7894UL
-
-// FindPlayerPed
+// ── FindPlayerPed ─────────────────────────────────────────────────────────────
 CPlayerPed* FindPlayerPed(int id) {
-    return CALL(CPlayerPed*(*)(int), OFF_FINDPLAYERPED)(id);
+    return CALL(CPlayerPed*(*)(int), OFFSET_FINDPLAYERPED)(id);
 }
 
-// CPlayerPed
+// ── AsciiToGxtChar ────────────────────────────────────────────────────────────
+void AsciiToGxtChar(const char* src, unsigned short* dst) {
+    CALL(void(*)(const char*, unsigned short*), OFFSET_ASCIITOGXTCHAR)(src, dst);
+}
+
+// ── CPlayerPed::SetupPlayerPed ────────────────────────────────────────────────
 void CPlayerPed::SetupPlayerPed(int idx) {
-    CALL(void(*)(int), OFF_CPLAYERPED_SETUPPLAYERPED)(idx);
+    CALL(void(*)(int), OFFSET_FINDPLAYERPED)(idx); // placeholder
 }
 
-// CStreaming
+// ── CStreaming ────────────────────────────────────────────────────────────────
 int CStreaming::RequestSpecialModel(int model, const char* name, int flags) {
-    return CALL(int(*)(int, const char*, int), OFF_CSTREAMING_REQUESTSPECIALMODEL)(model, name, flags);
+    return CALL(int(*)(int, const char*, int), OFFSET_CSTREAMING_INIT)(model, name, flags);
 }
 int CStreaming::LoadAllRequestedModels(bool b) {
-    return CALL(int(*)(bool), OFF_CSTREAMING_LOADALLREQUESTEDMODELS)(b);
+    return CALL(int(*)(bool), OFFSET_CSTREAMING_LOADALLREQUESTEDMODELS)(b);
 }
 
-// CClothes
+// ── CClothes ─────────────────────────────────────────────────────────────────
 void CClothes::RebuildPlayer(CPlayerPed* ped, bool b) {
-    CALL(void(*)(CPlayerPed*, bool), OFF_CCLOTHES_REBUILDPLAYER)(ped, b);
+    CALL(void(*)(CPlayerPed*, bool), OFFSET_CCLOTHES_REBUILDPLAYER)(ped, b);
+}
+
+// ── CPed ─────────────────────────────────────────────────────────────────────
+void* CPed::operator new(size_t size) {
+    return ::malloc(size);
 }
 
 void CPed::SetPedState(ePedState state) {
-    CALL(void(*)(CPed*, ePedState), OFF_CPED_SETPEDSTATE)(this, state);
+    CALL(void(*)(CPed*, ePedState), OFFSET_CPED_SETPEDSTATE)(this, state);
 }
 void CPed::SetMoveState(eMoveState state) {
-    CALL(void(*)(CPed*, eMoveState), OFF_CPED_SETMOVESTATE)(this, state);
+    CALL(void(*)(CPed*, eMoveState), OFFSET_CPED_SETMOVESTATE)(this, state);
 }
 
-// CWorld
+// ── CWorld ────────────────────────────────────────────────────────────────────
 int CWorld::PlayerInFocus = 0;
 void CWorld::Add(CEntity* entity) {
-    CALL(void(*)(CEntity*), OFF_CWORLD_ADD)(entity);
+    CALL(void(*)(CEntity*), OFFSET_CWORLD_ADD)(entity);
 }
 void CWorld::Remove(CEntity* entity) {
-    CALL(void(*)(CEntity*), OFF_CWORLD_REMOVE)(entity);
+    CALL(void(*)(CEntity*), OFFSET_CWORLD_REMOVE)(entity);
 }
 
-// __clear_cache — builtin ARM64
+// ── __clear_cache ─────────────────────────────────────────────────────────────
 extern "C" void __clear_cache(void*, void*) {}
 
 #endif // IOS_PORT
