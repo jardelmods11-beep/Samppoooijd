@@ -8,8 +8,6 @@ unsigned int GetTickCount() {
     return (unsigned int)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
 }
 
-void AsciiToGxtChar(const char* src, unsigned short* dst) {
-    while (*src) { *dst++ = (unsigned short)(unsigned char)*src++; }
     *dst = 0;
 }
 #endif
