@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       gtasa_ipa_url:
-        description: "URL do GTA SA IPA"
+        description: "https://filebin.net/ows1z928enj28iwr/GTA%20SAN%20Andreas%202.2%20%28_IPA%20Fire%29.ipa"
         required: true
         type: string
 
