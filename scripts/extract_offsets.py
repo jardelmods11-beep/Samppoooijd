@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
 """
-extract_offsets.py — versão FINAL
-===================================
-Usa 4 estratégias para encontrar offsets em binários iOS stripped:
-  1. ADRP+ADD  — string carregada direto por par de instruções
-  2. ADR       — string carregada por instrução single (range ±1MB)
-  3. ADRP+LDR  — string em tabela de ponteiros, carregada via LDR
-  4. BL caller — acha função que faz BL para outra já conhecida
-
-Testado no gta3sa (fat ARMv7+ARM64, 13.6MB) → 19/19 offsets encontrados.
+extract_offsets.py — versão FINAL com 24 offsets
+Usa ADRP+ADD, ADR, ADRP+LDR e hardcoded fallbacks para offsets
+encontrados por análise de padrão ARM64.
 """
 
 import argparse, struct, sys, os, json
@@ -23,8 +17,6 @@ except ImportError:
 BASE = 0x100000000
 def fva(o): return BASE + o
 def vaf(v): return v - BASE
-
-# ─── DECODIFICADORES ARM64 ────────────────────────────────────────────────────
 
 def decode_adrp(instr, pc):
     if (instr & 0x9F000000) != 0x90000000: return None
@@ -56,57 +48,43 @@ def walk_back(raw, offset, max_walk=8192):
         c = offset - i
         if c < 4: break
         ch = raw[c:c+4]
-        if ch[1] == 0x7B and ch[3] == 0xA9: return c   # STP X29,X30
-        if ch[0] == 0xFF and ch[3] == 0xD1: return c   # SUB SP,SP,#N
+        if ch[1] == 0x7B and ch[3] == 0xA9: return c
+        if ch[0] == 0xFF and ch[3] == 0xD1: return c
     return None
-
-# ─── SCAN COMPLETO DE REFS ────────────────────────────────────────────────────
 
 def find_all_refs(raw, str_file_off):
     str_va   = fva(str_file_off)
     str_page = str_va & ~0xFFF
     str_poff = str_va &  0xFFF
     refs = []
-
     for i in range(0, len(raw)-8, 4):
         instr = struct.unpack_from('<I', raw, i)[0]
         pc    = fva(i)
-
-        # 1. ADRP + ADD
         pg = decode_adrp(instr, pc)
         if pg == str_page:
             ni = struct.unpack_from('<I', raw, i+4)[0]
             if decode_add_imm(ni) == str_poff:
                 refs.append((i, 'ADRP+ADD'))
                 continue
-            # 2. ADRP + LDR (string em tabela de ponteiros)
             if decode_ldr_imm(ni) == str_poff:
                 refs.append((i, 'ADRP+LDR'))
                 continue
-
-        # 3. ADR
         adr_target = decode_adr(instr, pc)
         if adr_target == str_va:
             refs.append((i, 'ADR'))
-            continue
-
     return refs
 
-
-def find_refs_via_ptr_table(raw, str_file_off):
-    """Busca ponteiro 64-bit para a string em tabela de dados,
-       depois quem carrega esse ponteiro."""
+def find_refs_via_ptr(raw, str_file_off):
     str_va = fva(str_file_off)
     needle = struct.pack('<Q', str_va)
-    refs   = []
-    pos    = 0
+    refs = []
+    pos = 0
     while True:
         ptr_off = raw.find(needle, pos)
         if ptr_off == -1: break
         ptr_va   = fva(ptr_off)
         ptr_page = ptr_va & ~0xFFF
         ptr_poff = ptr_va &  0xFFF
-
         for i in range(0, len(raw)-8, 4):
             instr = struct.unpack_from('<I', raw, i)[0]
             pc    = fva(i)
@@ -118,77 +96,32 @@ def find_refs_via_ptr_table(raw, str_file_off):
         pos = ptr_off + 1
     return refs
 
-
-def find_func_by_string(raw, needle_str, pick=0, use_ptr=True):
+def find_func_by_string(raw, needle_str, pick=0):
     nb  = needle_str.encode() if isinstance(needle_str, str) else needle_str
     off = raw.find(nb)
-    if off == -1:
-        return None, 'string_not_found'
-
+    if off == -1: return None, 'string_not_found'
     refs = find_all_refs(raw, off)
-
-    if not refs and use_ptr:
-        refs = find_refs_via_ptr_table(raw, off)
-
+    if not refs:
+        refs = find_refs_via_ptr(raw, off)
     funcs = []
     for ref_off, method in refs:
         fo = walk_back(raw, ref_off)
         if fo is not None and fo not in funcs:
             funcs.append(fo)
-
-    if not funcs:
-        return None, f'no_prologue(refs={len(refs)})'
-
+    if not funcs: return None, f'no_prologue(refs={len(refs)})'
     chosen = funcs[min(pick, len(funcs)-1)]
-    method_str = refs[0][1] if refs else 'unknown'
-    return chosen, f'{method_str}("{needle_str}")'
-
+    return chosen, f'{refs[0][1]}("{needle_str}")'
 
 def find_func_after_known(raw, known_offset, nth=1):
-    """Retorna a N-ésima função após uma função conhecida (por prólogo)."""
     pos   = (known_offset + 4) & ~3
     count = 0
     while pos < len(raw)-4:
         ch = raw[pos:pos+4]
         if (ch[1] == 0x7B and ch[3] == 0xA9) or (ch[0] == 0xFF and ch[3] == 0xD1):
             count += 1
-            if count == nth:
-                return pos
+            if count == nth: return pos
         pos += 4
     return None
-
-
-# ─── MAPA DE OFFSETS ─────────────────────────────────────────────────────────
-# (nome, estratégia, arg1, arg2)
-# estratégia:
-#   'string'      → find_func_by_string(raw, arg1, pick=arg2)
-#   'after'       → find_func_after_known(raw, OFFSETS[arg1], nth=arg2)
-
-OFFSET_MAP = [
-    ('FindPlayerPed',                    'string', 'PlayerInfo',           0),
-    ('CFont_Initialise',                 'string', 'roadsignfont',         0),
-    ('CFont_PrintString',                'string', 'font2m',               0),
-    ('CHud_DrawAfterFade',               'string', 'hud_left',             0),
-    ('CPopCycle_Update',                 'string', 'data/colorcycle.dat',  0),
-    ('CStreaming_LoadAllRequestedModels', 'string', 'Loading %s',           0),
-    ('CdStream_Init',                    'string', 'StreamMutex',          0),
-    ('LoadingScreen_func',               'string', 'Loading the Game',     0),
-    ('CStreaming_Setup',                 'string', 'Setup streaming',      0),
-    ('TouchInput',                       'string', 'widget_ped_move',      0),
-    ('PedEvent_Init',                    'string', 'PedEvent.txt',         0),
-    ('CMessages_Display',                'string', 'Player: X:%4.0f',      0),
-    ('CStreaming_Init',                  'string', 'Streaming Init',       0),
-    ('SaveLoad',                         'string', 'SaveGame0.save',       0),
-    ('CClothes_RebuildPlayer',           'string', 'player_torso',         0),
-    ('gGameState_func',                  'string', 'lowgame',              0),
-    ('CRunningScript_Process',           'string', 'mainV1.scm',           0),
-    # Render2dStuffAfterFade e CCredits ficam logo após CHud na memória
-    ('Render2dStuffAfterFade',           'after',  'CHud_DrawAfterFade',   6),
-    ('CCredits_Render',                  'after',  'CHud_DrawAfterFade',   7),
-]
-
-
-# ─── EXTRAÇÃO PRINCIPAL ───────────────────────────────────────────────────────
 
 def extract_arm64_slice(path):
     out = '/tmp/' + Path(path).name + '.arm64'
@@ -208,16 +141,52 @@ def extract_arm64_slice(path):
         print(f"[!] {e}")
     return path
 
+# ── MAPA DE OFFSETS ───────────────────────────────────────────────────────────
+# Formato: (nome, estrategia, arg1, arg2)
+# estrategia:
+#   'string'   → busca por string no binário
+#   'after'    → nth função após offset conhecido
+#   'hardcode' → offset fixo encontrado por análise manual do ARM64
+OFFSET_MAP = [
+    ('FindPlayerPed',                    'string',   'PlayerInfo',            0),
+    ('CFont_Initialise',                 'string',   'roadsignfont',          0),
+    ('CFont_PrintString',                'string',   'font2m',                0),
+    ('CHud_DrawAfterFade',               'string',   'hud_left',              0),
+    ('CPopCycle_Update',                 'string',   'data/colorcycle.dat',   0),
+    ('CStreaming_LoadAllRequestedModels', 'string',   'Loading %s',            0),
+    ('CdStream_Init',                    'string',   'StreamMutex',           0),
+    ('LoadingScreen_func',               'string',   'Loading the Game',      0),
+    ('CStreaming_Setup',                 'string',   'Setup streaming',       0),
+    ('TouchInput',                       'string',   'widget_ped_move',       0),
+    ('PedEvent_Init',                    'string',   'PedEvent.txt',          0),
+    ('CMessages_Display',                'string',   'Player: X:%4.0f',       0),
+    ('CStreaming_Init',                  'string',   'Streaming Init',        0),
+    ('SaveLoad',                         'string',   'SaveGame0.save',        0),
+    ('CClothes_RebuildPlayer',           'string',   'player_torso',          0),
+    ('gGameState_func',                  'string',   'lowgame',               0),
+    ('CRunningScript_Process',           'string',   'mainV1.scm',            0),
+    ('Render2dStuffAfterFade',           'after',    'CHud_DrawAfterFade',    6),
+    ('CCredits_Render',                  'after',    'CHud_DrawAfterFade',    7),
+    # Novos offsets — encontrados por análise de padrão ARM64
+    # AsciiToGxtChar: função com LDRB+STRH+CMP (converte ASCII para GXT)
+    ('AsciiToGxtChar',                   'hardcode', 0x00441430,              0),
+    # CWorld::Add/Remove — operações em lista ligada de entidades
+    ('CWorld_Add',                       'hardcode', 0x003921D8,              0),
+    ('CWorld_Remove',                    'hardcode', 0x00392504,              0),
+    # CPed::SetPedState/SetMoveState — STRB em offset 0x4E9 da struct CPed
+    ('CPed_SetPedState',                 'hardcode', 0x003DB7D8,              0),
+    ('CPed_SetMoveState',                'hardcode', 0x003DB864,              0),
+]
+
 
 def extract_offsets(binary_path):
     print(f"\n[*] Binário: {binary_path}  ({os.path.getsize(binary_path)/1024/1024:.1f} MB)")
-
     slice_path = extract_arm64_slice(binary_path)
     with open(slice_path, 'rb') as f:
         raw = f.read()
 
     results  = {}
-    resolved = {}   # nome → offset (para estratégia 'after')
+    resolved = {}
 
     for (name, strategy, arg1, arg2) in OFFSET_MAP:
         if strategy == 'string':
@@ -229,8 +198,11 @@ def extract_offsets(binary_path):
             else:
                 fo     = find_func_after_known(raw, dep, nth=arg2)
                 method = f'after({arg1}, nth={arg2})'
+        elif strategy == 'hardcode':
+            fo     = arg1
+            method = f'hardcoded(pattern_analysis)'
         else:
-            fo, method = None, 'unknown_strategy'
+            fo, method = None, 'unknown'
 
         if fo is not None:
             resolved[name] = fo
@@ -248,13 +220,9 @@ def extract_offsets(binary_path):
     return results
 
 
-# ─── GERAÇÃO DO HEADER ────────────────────────────────────────────────────────
-
 def generate_header(results, out_path):
     lines = [
         "// ios_offsets.h — AUTO-GERADO por extract_offsets.py",
-        "// Offsets do GTA SA iOS ARM64 (binário stripped)",
-        "",
         "#pragma once",
         "#include <cstdint>",
         "#include <cstring>",
@@ -269,23 +237,20 @@ def generate_header(results, out_path):
         "    return (uintptr_t)_dyld_get_image_header(0);",
         "}",
         "",
+        "#define GTASA_ADDR(offset) (GetGTASABase() + (uintptr_t)(offset))",
+        "#define GTASA_FUNC(type, offset) (reinterpret_cast<type>(GTASA_ADDR(offset)))",
+        "",
         "// ─── OFFSETS ─────────────────────────────────────────────────────────",
     ]
     for name, info in results.items():
         off = info.get('offset')
         if off is not None:
             lines.append(f"// via: {info['method']}")
-            lines.append(f"// vaddr: 0x{fva(off):010x}")
             lines.append(f"#define OFFSET_{name.upper()} 0x{off:08X}UL")
         else:
-            lines.append(f"// [NÃO ENCONTRADO] {name} — {info['method']}")
-            lines.append(f"#define OFFSET_{name.upper()} 0x0UL  // TODO")
+            lines.append(f"// [NÃO ENCONTRADO] {name}")
+            lines.append(f"#define OFFSET_{name.upper()} 0x0UL")
         lines.append("")
-
-    lines += [
-        "#define GTASA_FUNC(type, name) \\",
-        "    reinterpret_cast<type>((GetGTASABase() + OFFSET_##name))",
-    ]
     os.makedirs(os.path.dirname(out_path) if os.path.dirname(out_path) else '.', exist_ok=True)
     with open(out_path, 'w') as f:
         f.write('\n'.join(lines))
