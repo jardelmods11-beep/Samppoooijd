@@ -1,20 +1,17 @@
-name: SAMP iOS Build
+name: SAMP iOS - Compilar dylib
 
 on:
   workflow_dispatch:
     inputs:
-      gtasa_ipa_url:
-        description: "https://filebin.net/ows1z928enj28iwr/GTA%20SAN%20Andreas%202.2%20%28_IPA%20Fire%29.ipa"
+      gta3sa_url:
+        description: "URL do arquivo gta3sa (para extrair offsets)"
         required: true
         type: string
 
 jobs:
-  # ── Job 1: Ubuntu (barato) — baixa IPA, extrai offsets ──────────────────────
-  prepare:
+  # ── Job 1: Ubuntu (barato) — extrai offsets ──────────────────────────────────
+  offsets:
     runs-on: ubuntu-latest
-    outputs:
-      offsets: ${{ steps.offsets.outputs.content }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,54 +19,44 @@ jobs:
       - name: Instalar Python
         run: pip3 install lief --break-system-packages
 
-      - name: Baixar GTA SA IPA
+      - name: Baixar gta3sa
         run: |
-          mkdir -p ipa_input
-          curl -L "${{ github.event.inputs.gtasa_ipa_url }}" -o ipa_input/gtasa_original.ipa
-          echo "Tamanho: $(du -sh ipa_input/gtasa_original.ipa | cut -f1)"
+          mkdir -p extracted
+          curl -L "${{ github.event.inputs.gta3sa_url }}" -o extracted/gta3sa
+          echo "Tamanho: $(du -sh extracted/gta3sa | cut -f1)"
 
-      - name: Extrair binário GTASA do IPA
-        run: |
-          python3 scripts/unpack_ipa.py --ipa ipa_input/gtasa_original.ipa --output extracted/
-          BINARY=$(python3 scripts/unpack_ipa.py --ipa ipa_input/gtasa_original.ipa --output extracted/ 2>/dev/null | grep "BINARY_PATH=" | cut -d= -f2)
-          echo "GTASA_BINARY=$BINARY" >> $GITHUB_ENV
-
-      - name: Extrair offsets do GTASA iOS
-        id: offsets
+      - name: Extrair offsets
         run: |
           python3 scripts/extract_offsets.py \
-            --binary "${{ env.GTASA_BINARY }}" \
+            --binary extracted/gta3sa \
             --output src/ios_offsets.h \
             --json offsets_report.json
           cat src/ios_offsets.h
 
-      - name: Salvar IPA e offsets para próximo job
+      - name: Salvar offsets
         uses: actions/upload-artifact@v4
         with:
-          name: prepare-artifacts
+          name: offsets
           path: |
-            ipa_input/gtasa_original.ipa
             src/ios_offsets.h
             offsets_report.json
           retention-days: 1
 
-  # ── Job 2: macOS (só compilação da dylib ~1-2 min) ──────────────────────────
+  # ── Job 2: macOS — compila a dylib ───────────────────────────────────────────
   build:
     runs-on: macos-latest
-    needs: prepare
-
+    needs: offsets
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Baixar artifacts do job anterior
+      - name: Baixar offsets
         uses: actions/download-artifact@v4
         with:
-          name: prepare-artifacts
+          name: offsets
 
-      - name: Mover arquivos para lugar certo
+      - name: Mover ios_offsets.h
         run: |
-          mv gtasa_original.ipa ipa_input/gtasa_original.ipa 2>/dev/null || true
           mv ios_offsets.h src/ios_offsets.h 2>/dev/null || true
           ls src/ios_offsets.h && echo "offsets OK"
 
@@ -80,7 +67,7 @@ jobs:
           CLANG=$(xcrun --find clang++)
 
           CFLAGS="-target arm64-apple-ios12.0 -isysroot $SDK -O2 -fvisibility=hidden -fPIC -std=c++17 -DIOS_PORT -DHOST_ENDIAN_IS_LITTLE -DLITTLE_ENDIAN -DRAKSAMP_CLIENT -DNETCODE_OPENCONNLULZ=6969 -frtti -fexceptions -w -I src/ -I sa_include/ -I raknet/ -I raknet/SAMP/ -I ttmath/"
-          LDFLAGS="-dynamiclib -target arm64-apple-ios12.0 -isysroot $SDK -install_name @executable_path/Frameworks/libSAMP.dylib -lc++"
+          LDFLAGS="-dynamiclib -target arm64-apple-ios12.0 -isysroot $SDK -install_name @executable_path/Frameworks/libSAMP.dylib -lc++ -framework Foundation"
 
           OBJECTS=""
           PIDS=()
@@ -101,28 +88,18 @@ jobs:
           file build/libSAMP.dylib
           ls -lh build/libSAMP.dylib
 
-      - name: Injetar libSAMP.dylib no IPA
-        run: |
-          pip3 install lief --break-system-packages
-          python3 scripts/inject_dylib.py \
-            --ipa ipa_input/gtasa_original.ipa \
-            --dylib build/libSAMP.dylib \
-            --output gtasa_samp.ipa
-          ls -lh gtasa_samp.ipa
-
-      - name: Upload IPA final
+      - name: Upload libSAMP.dylib
         uses: actions/upload-artifact@v4
         with:
-          name: gtasa-samp-ios
-          path: gtasa_samp.ipa
-          retention-days: 7
+          name: libSAMP-dylib
+          path: build/libSAMP.dylib
+          retention-days: 30
 
-      - name: Upload dylib e offsets
+      - name: Upload offsets
         uses: actions/upload-artifact@v4
         with:
-          name: build-artifacts
+          name: offsets-report
           path: |
-            build/libSAMP.dylib
             offsets_report.json
             src/ios_offsets.h
           retention-days: 30
