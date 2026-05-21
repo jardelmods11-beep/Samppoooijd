@@ -5,8 +5,11 @@
 #include "utils.h"
 
 #ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/vm_map.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <libkern/OSCacheControl.h>
 #endif
 
 #define OFF_CHUD_DRAWAFTERFADE      0x002A67D4UL
@@ -17,34 +20,69 @@
 #define OFF_CRUNNINGSCRIPT_PROCESS  0x001CFF1CUL
 #define OFF_CPOPCYCLE_UPDATE        0x002F7894UL
 
-static void hook_jmp(uintptr_t offset, void* dest) {
+static bool write_memory(uintptr_t addr, void* data, size_t size) {
 #ifdef __APPLE__
-    uintptr_t from = GetBase() + offset;
-    if (!from || !dest) return;
-    int64_t diff = ((int64_t)(uintptr_t)dest - (int64_t)from) / 4;
-    // Verifica se está dentro do range do B instruction (±128MB)
-    if (diff < -(1<<25) || diff > ((1<<25)-1)) {
-        samp_log("[SAMP] AVISO: hook fora do range: 0x%lx -> %p diff=%lld",
-                 (unsigned long)from, dest, (long long)diff);
-        return;
+    // Método 1: vm_protect via Mach (mais permissivo que mprotect no iOS)
+    mach_port_t task = mach_task_self();
+    vm_address_t page = addr & ~(vm_address_t)(getpagesize() - 1);
+    vm_size_t page_size = getpagesize() * 2;
+
+    kern_return_t kr = vm_protect(task, page, page_size, false,
+                                  VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+    if (kr != KERN_SUCCESS) {
+        samp_log("[SAMP] vm_protect falhou (kr=%d) para 0x%lx — tentando vm_write...", kr, addr);
+        // Método 2: vm_write — escreve diretamente na memória do processo
+        kr = vm_write(task, addr, (vm_offset_t)data, size);
+        if (kr != KERN_SUCCESS) {
+            samp_log("[SAMP] vm_write também falhou (kr=%d) para 0x%lx", kr, addr);
+            return false;
+        }
+        sys_icache_invalidate((void*)addr, size);
+        return true;
     }
-    uint32_t instr = 0x14000000 | ((uint32_t)(diff) & 0x3FFFFFF);
-    uintptr_t page = from & ~(uintptr_t)(getpagesize()-1);
-    if (mprotect((void*)page, getpagesize()*2, PROT_READ|PROT_WRITE|PROT_EXEC) != 0) {
-        samp_log("[SAMP] AVISO: mprotect falhou para 0x%lx", (unsigned long)from);
-        return;
-    }
-    memcpy((void*)from, &instr, 4);
-    __builtin___clear_cache((char*)from, (char*)(from+4));
-    samp_log("[SAMP] Hook OK: 0x%lx -> %p", (unsigned long)from, dest);
+    memcpy((void*)addr, data, size);
+    sys_icache_invalidate((void*)addr, size);
+    // Restaura proteção
+    vm_protect(task, page, page_size, false, VM_PROT_READ | VM_PROT_EXECUTE);
+    return true;
+#else
+    return false;
 #endif
 }
 
+static void hook_jmp(uintptr_t offset, void* dest) {
+    uintptr_t from = GetBase() + offset;
+    if (!from || !dest) return;
+
+    int64_t diff = ((int64_t)(uintptr_t)dest - (int64_t)from) / 4;
+    if (diff < -(1<<25) || diff > ((1<<25)-1)) {
+        samp_log("[SAMP] Hook fora do range B: 0x%lx diff=%lld — usando trampolim", from, (long long)diff);
+        // Trampolim ARM64: LDR X16, #8 / BR X16 / .quad addr
+        uint8_t tramp[16];
+        uint32_t ldr = 0x58000050; // LDR X16, #8
+        uint32_t br  = 0xD61F0200; // BR X16
+        uint64_t addr = (uint64_t)(uintptr_t)dest;
+        memcpy(tramp,    &ldr,  4);
+        memcpy(tramp+4,  &br,   4);
+        memcpy(tramp+8,  &addr, 8);
+        if (write_memory(from, tramp, 16)) {
+            samp_log("[SAMP] Hook trampolim OK: 0x%lx -> %p", from, dest);
+        }
+        return;
+    }
+
+    uint32_t instr = 0x14000000 | ((uint32_t)(diff) & 0x3FFFFFF);
+    if (write_memory(from, &instr, 4)) {
+        samp_log("[SAMP] Hook B OK: 0x%lx -> %p", from, dest);
+    }
+}
+
+// ── Hooks ─────────────────────────────────────────────────────────────────────
 int CRunningScript__Process_hook(void*) {
     static bool done = false;
     if (!done) {
         done = true;
-        samp_log("[SAMP] CRunningScript::Process hookado!");
+        samp_log("[SAMP] CRunningScript::Process — primeiro tick!");
         CNetGame* g = CNetGame::Instance();
         if (g && g->getPlayerPool()) {
             CPlayerPed* ped = g->getPlayerPool()->GetLocalPlayer()->CreateGTAPlayer();
@@ -70,7 +108,7 @@ void Render2dStuffAfterFade_hook() {
 }
 
 void InitHooks() {
-    samp_log("[SAMP] Iniciando hooks...");
+    samp_log("[SAMP] Aplicando hooks (vm_protect/vm_write)...");
     samp_log("[SAMP] Base = 0x%lx", (unsigned long)GetBase());
 
     hook_jmp(OFF_CRUNNINGSCRIPT_PROCESS, (void*)CRunningScript__Process_hook);
@@ -78,7 +116,7 @@ void InitHooks() {
     hook_jmp(OFF_LOADINGSCREEN_FUNC,     (void*)LoadingScreen_hook);
     hook_jmp(OFF_RENDER2DSTUFFAFTERFADE, (void*)Render2dStuffAfterFade_hook);
 
-    samp_log("[SAMP] Todos os hooks aplicados!");
+    samp_log("[SAMP] Hooks finalizados!");
 }
 
 #endif // IOS_PORT
