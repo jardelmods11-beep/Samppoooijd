@@ -1,58 +1,103 @@
-name: SAMP iOS - Patch Estatico
+name: SAMP iOS Build
 
 on:
   workflow_dispatch:
     inputs:
-      gtasa_ipa_url:
-        description: "URL do GTA SA IPA"
+      gta3sa_url:
+        description: "URL do arquivo gta3sa"
         required: true
         type: string
 
 jobs:
-  build:
+  prepare:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Instalar dependências
+      - name: Instalar Python
         run: pip3 install lief --break-system-packages
 
-      - name: Baixar GTA SA IPA
+      - name: Baixar gta3sa
         run: |
-          mkdir -p ipa_input
-          curl -L "${{ github.event.inputs.gtasa_ipa_url }}" -o ipa_input/gtasa_original.ipa
-          echo "Tamanho: $(du -sh ipa_input/gtasa_original.ipa | cut -f1)"
+          mkdir -p extracted
+          curl -L "${{ github.event.inputs.gta3sa_url }}" -o extracted/gta3sa
+          echo "Tamanho: $(du -sh extracted/gta3sa | cut -f1)"
+          file extracted/gta3sa
 
-      - name: Extrair binário do IPA
+      - name: Extrair offsets
         run: |
-          python3 scripts/unpack_ipa.py \
-            --ipa ipa_input/gtasa_original.ipa \
-            --output extracted/
-          BINARY=$(python3 scripts/unpack_ipa.py \
-            --ipa ipa_input/gtasa_original.ipa \
-            --output extracted/ 2>/dev/null | grep "BINARY_PATH=" | cut -d= -f2)
-          echo "GTASA_BINARY=$BINARY" >> $GITHUB_ENV
+          python3 scripts/extract_offsets.py \
+            --binary extracted/gta3sa \
+            --output src/ios_offsets.h \
+            --json offsets_report.json
+          cat src/ios_offsets.h
 
-      - name: Aplicar patch estático
-        run: |
-          python3 scripts/patch_binary.py \
-            --binary "${{ env.GTASA_BINARY }}" \
-            --output extracted/gta3sa_patched
-          ls -lh extracted/gta3sa_patched
-
-      - name: Reempacotar IPA
-        run: |
-          python3 scripts/repack_ipa.py \
-            --ipa ipa_input/gtasa_original.ipa \
-            --binary extracted/gta3sa_patched \
-            --output gtasa_samp_patched.ipa
-          ls -lh gtasa_samp_patched.ipa
-
-      - name: Upload IPA patchado
+      - name: Salvar offsets
         uses: actions/upload-artifact@v4
         with:
-          name: gtasa-samp-patched
-          path: gtasa_samp_patched.ipa
-          retention-days: 7
+          name: prepare-artifacts
+          path: |
+            src/ios_offsets.h
+            offsets_report.json
+          retention-days: 1
+
+  build:
+    runs-on: macos-latest
+    needs: prepare
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Baixar offsets
+        uses: actions/download-artifact@v4
+        with:
+          name: prepare-artifacts
+
+      - name: Mover offsets
+        run: |
+          mv ios_offsets.h src/ios_offsets.h 2>/dev/null || true
+          ls src/ios_offsets.h && echo "offsets OK"
+
+      - name: Compilar libSAMP.dylib (ARM64 iOS)
+        run: |
+          mkdir -p build
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          CLANG=$(xcrun --find clang++)
+          CFLAGS="-target arm64-apple-ios12.0 -isysroot $SDK -O2 -fvisibility=hidden -fPIC -std=c++17 -DIOS_PORT -DHOST_ENDIAN_IS_LITTLE -DLITTLE_ENDIAN -DRAKSAMP_CLIENT -DNETCODE_OPENCONNLULZ=6969 -frtti -fexceptions -w -I src/ -I sa_include/ -I raknet/ -I raknet/SAMP/ -I ttmath/"
+          LDFLAGS="-dynamiclib -target arm64-apple-ios12.0 -isysroot $SDK -install_name @executable_path/Frameworks/libSAMP.dylib -lc++ -framework Foundation"
+
+          OBJECTS=""
+          PIDS=()
+          for cpp in src/*.cpp raknet/*.cpp raknet/SAMP/*.cpp; do
+            [ -f "$cpp" ] || continue
+            obj="build/$(echo $cpp | tr '/' '_').o"
+            $CLANG $CFLAGS -c "$cpp" -o "$obj" &
+            PIDS+=($!)
+            OBJECTS="$OBJECTS $obj"
+          done
+
+          FAIL=0
+          for pid in "${PIDS[@]}"; do wait $pid || FAIL=1; done
+          [ $FAIL -eq 0 ] || { echo "ERRO na compilacao"; exit 1; }
+
+          echo "[LD] Linkando..."
+          $CLANG $LDFLAGS $OBJECTS -o build/libSAMP.dylib
+          file build/libSAMP.dylib
+          ls -lh build/libSAMP.dylib
+
+      - name: Upload libSAMP.dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: libSAMP-dylib
+          path: build/libSAMP.dylib
+          retention-days: 30
+
+      - name: Upload offsets
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: |
+            offsets_report.json
+            src/ios_offsets.h
+          retention-days: 30
