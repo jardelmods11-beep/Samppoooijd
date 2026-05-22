@@ -26,71 +26,43 @@ void samp_log(const char* fmt, ...) {
 }
 
 static void init_log() {
-    // Tenta vários caminhos para garantir que o log seja criado
-    const char* paths[] = {
-        "/var/mobile/Documents/samp.log",
-        "/tmp/samp.log",
-        nullptr
-    };
     const char* home = getenv("HOME");
-    char home_path[512];
+    char path[512];
     if (home) {
-        snprintf(home_path, sizeof(home_path), "%s/Documents/samp.log", home);
-        paths[0] = home_path;
+        snprintf(path, sizeof(path), "%s/Documents/samp.log", home);
+        g_logFile = fopen(path, "w");
     }
-    for (int i = 0; paths[i]; i++) {
-        g_logFile = fopen(paths[i], "w");
-        if (g_logFile) {
-            samp_log("[SAMP] Log aberto: %s", paths[i]);
-            break;
-        }
+    if (!g_logFile) {
+        g_logFile = fopen("/tmp/samp.log", "w");
     }
 }
 
-static void* samp_init_thread(void*) {
-    samp_log("[SAMP] Thread iniciada, aguardando 5s...");
-
-    // Aguarda mais tempo para o jogo carregar completamente
-    sleep(5);
-
-    samp_log("[SAMP] Verificando base...");
-    uintptr_t base = GetBase();
-    samp_log("[SAMP] Base: 0x%lx", base);
-
-    if (base == 0) {
-        samp_log("[SAMP] ERRO: base = 0, abortando");
-        return nullptr;
-    }
-
-    // Verifica se os offsets críticos estão definidos
-    samp_log("[SAMP] OFFSET_CRUNNINGSCRIPT_PROCESS = 0x%lx", (unsigned long)OFFSET_CRUNNINGSCRIPT_PROCESS);
-    samp_log("[SAMP] OFFSET_CHUD_DRAWAFTERFADE = 0x%lx", (unsigned long)OFFSET_CHUD_DRAWAFTERFADE);
-
-    if (OFFSET_CRUNNINGSCRIPT_PROCESS == 0) {
-        samp_log("[SAMP] ERRO: offsets = 0, abortando");
-        return nullptr;
-    }
-
-    samp_log("[SAMP] Aplicando hooks...");
-    InitHooks();
-    samp_log("[SAMP] Inicializado com sucesso!");
+static void* samp_net_thread(void*) {
+    samp_log("[SAMP] Thread de rede iniciada");
+    // Aqui vai a lógica de rede do SAMP no futuro
     return nullptr;
 }
 
 __attribute__((constructor))
 static void samp_ios_constructor() {
-    // Abre o log PRIMEIRO antes de qualquer outra coisa
+    // Abre o log primeiro
     init_log();
     samp_log("[SAMP] ============================================");
     samp_log("[SAMP] libSAMP.dylib carregada!");
     samp_log("[SAMP] Compilado: %s %s", __DATE__, __TIME__);
     samp_log("[SAMP] ============================================");
 
+    // Aplica hooks IMEDIATAMENTE — antes do iOS ativar W^X
+    samp_log("[SAMP] Base: 0x%lx", (unsigned long)GetBase());
+    samp_log("[SAMP] Aplicando hooks agora (sem delay)...");
+    InitHooks();
+
+    // Inicia thread de rede separada
     pthread_t thread;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    pthread_create(&thread, &attr, samp_init_thread, nullptr);
+    pthread_create(&thread, &attr, samp_net_thread, nullptr);
     pthread_attr_destroy(&attr);
 }
 
@@ -102,4 +74,4 @@ static void samp_ios_destructor() {
         g_logFile = nullptr;
     }
 }
-#endif // IOS_PORT
+#endif
